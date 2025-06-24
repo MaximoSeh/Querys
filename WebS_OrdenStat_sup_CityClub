@@ -1,0 +1,200 @@
+ DECLARE  
+ @Id_Num_Orden INT  
+  
+
+SELECT @Id_Num_Orden = 559033710 
+
+DECLARE		 --@Ind_Redondeo			TINYINT
+			 --@Bit_UsaMovil			BIT
+			--,@Bit_HaySurtidoTYC		BIT
+			--,@Id_Num_OrdenStat		TINYINT
+			--,@Desc_OrdenStat		CHAR(40)
+			-- *********************************
+			--,@Id_Num_Un				INT
+			--,@Fec_Movto				DATETIME
+			@ueType	VARCHAR(20) = NULL;  
+
+/*** INICIO Ordenes SETC y DST ***/
+-- Se crea tabla para almacenar las ordenes relacionadas.
+DECLARE	 @Status_Ordenes		TABLE
+	( Id_Num_Orden			INT,
+	  Id_Num_Un				INT NULL,
+	  Id_Num_OrdenStat		TINYINT NULL,
+	  Desc_OrdenStat		CHAR(40) NULL,
+	  Fec_Movto				DATETIME NULL,
+	  Ind_Redondeo			TINYINT NULL,
+	  Bit_UsaMovil			BIT NULL,
+	  Bit_HaySurtidoTYC		BIT NULL)
+declare  @Id_Num_Orden16    varchar(16),
+	     @UeNo              varchar(25),
+		 @Id_Num_Original   int = @Id_Num_Orden;
+
+set	@Id_Num_Orden16 = RIGHT('0000000000000000' + CONVERT(VARCHAR,@Id_Num_Orden), 16);
+select top (1) @ueType = LTRIM(RTRIM(u.UeType)),
+				@UeNo = (SUBSTRING(u.UeNo,1,(CHARINDEX ( '-' , u.UeNo)) -1))
+		from OrderFacts_UE u 
+		where u.OrderNo=@Id_Num_Orden;
+
+if @UeNo is null
+begin
+	set @UeNo = substring(@Id_Num_Orden16,5,10)
+	set @Id_Num_Orden = isnull((select top (1) t.OrderNo from OrderFacts_UE_Transition t where t.OrderNoPOS = convert(int, @UeNo) order by OrderNo), (convert(int,(@UeNo + '21'))))
+	set @ueType = ISNULL((SELECT LTRIM(RTRIM(UeType)) FROM OrderFacts_UE WHERE ORDERNO = @Id_Num_Orden),'')
+end
+
+--IF @ueType = ''
+--BEGIN
+--SET @Id_Num_Orden =
+--	(SELECT top 1 o.OrderNo FROM OrderFacts_Order o
+--	JOIN OrderFacts_UE u ON o.OrderNo = u.OrderNo
+--	WHERE OriginalOrderNo = SUBSTRING(CONVERT(VARCHAR,@Id_Num_Orden),0,7)
+--	AND u.UeType = 'DST')
+--END
+
+
+INSERT INTO @Status_Ordenes (Id_Num_Orden)
+	SELECT u.OrderNo
+	FROM   OrderFacts_UE u (NOLOCK)
+	JOIN OrderFacts_UE_Transition o (NOLOCK)
+				ON u.OrderNo = o.OrderNo
+	WHERE  o.OrderNoPOS = convert(int, @UeNo)
+		AND (u.UeType = 'DST' or u.UeType = 'SETC')
+	GROUP BY u.OrderNo, u.UeType, u.StatusUe
+
+/*** FIN Ordenes SETC y DST ***/
+
+--
+--	LA ORDEN USARÁ EL SURTIDO ASISTIDO?
+--
+
+UPDATE stat
+SET		Bit_UsaMovil	= 
+			CASE
+				WHEN IsPickingManual = 0 THEN 1
+				ELSE 0
+			END
+	FROM	OrderFacts_UE ue (NOLOCK)
+	JOIN	@Status_Ordenes stat ON stat.Id_Num_Orden = ue.OrderNo
+	WHERE	ue.OrderNo	in (SELECT Id_Num_Orden FROM @Status_Ordenes)
+
+UPDATE @Status_Ordenes 
+SET Bit_UsaMovil = 0 WHERE Bit_UsaMovil IS NULL
+
+
+--
+--	SE TIENEN REGISTRO DEL SURTIDO DEL SURTIDO ASISTIDO?
+--
+
+IF ( SELECT		COUNT(1)
+			FROM	SOT_OrderFulfillment
+			WHERE	Id_Num_Orden	in (SELECT Id_Num_Orden FROM @Status_Ordenes) ) > 0
+	--SET		@Bit_HaySurtidoTYC	= 1
+	UPDATE stat
+	SET Bit_HaySurtidoTYC = 1
+	FROM SOT_OrderFulfillment sot
+	JOIN @Status_Ordenes stat ON sot.Id_Num_Orden = stat.Id_Num_Orden
+
+UPDATE @Status_Ordenes 
+SET Bit_HaySurtidoTYC = 0 WHERE Bit_HaySurtidoTYC IS NULL
+--
+--	SE OBTIENE EL ESTATUS DE LA ORDEN
+--
+/*
+SELECT		 @Id_Num_OrdenStat			= Orden.Id_Num_OrdenStat
+			,@Desc_OrdenStat			= OrdenStat.Desc_OrdenStat
+	FROM	Orden
+	JOIN	OrdenStat					( NOLOCK ) 
+	ON		OrdenStat.Id_Num_OrdenStat	= Orden.Id_Num_OrdenStat
+	WHERE	Id_Num_Orden				= @Id_Num_Orden
+*/
+
+
+--
+--	INDICA SI LA ORDEN LLEVA REDONDEO
+--
+/*
+SELECT		@Ind_Redondeo				= ISNULL( CONVERT( TINYINT, CarRedondeo_e.Bit_AplicarRedondeo ), 0 )
+	FROM	Orden						( NOLOCK )
+	JOIN	CarRedondeo_e				( NOLOCK ) 
+	ON		Orden.Id_Num_Car			= CarRedondeo_e.Id_Num_Car
+	WHERE	Orden.Id_Num_Orden			= @Id_Num_Orden
+*/
+
+/*INSERT INTO		dbo.OrderFacts_POS_WebS_Log 
+	VALUES		('Solicitud de status de Orden =' + CONVERT(VARCHAR,@Id_Num_Orden),dbo.fn_GetTimeZoneByStoreNumOrder(0, @Id_Num_Orden))*/
+
+INSERT INTO		dbo.OrderFacts_POS_WebS_Log
+SELECT 
+		'Solicitud de status de Orden =' + CONVERT(VARCHAR,Id_Num_Orden),
+		dbo.fn_GetTimeZoneByStoreNumOrder(0, Id_Num_Orden)
+FROM @Status_Ordenes
+
+
+declare @OrderStatus int = (select OrderStatus from OrderFacts_POSOrderStatus where orderno = @Id_Num_Orden);
+declare @StatusDesc varchar(50) = (select OrderStatusDesc from OrderFacts_POSOrderStatus where orderno = @Id_Num_Orden);
+
+if exists (select * from tbl_liquidacion_pps where Numero_Orden = @Id_Num_Orden)
+ begin
+	 set @OrderStatus = 4; --3;
+	 set @StatusDesc = 'Orden despachada'--'Orden en despacho'
+ end
+
+UPDATE @Status_Ordenes
+SET 
+			 Id_Num_Un                         = StoreNum
+			,Id_Num_OrdenStat                  = @OrderStatus
+			,Desc_OrdenStat                    = @StatusDesc
+			,Fec_Movto                         = OrderDateMov
+			,Ind_Redondeo                      = OrderRounding
+	FROM	OrderFacts_POSOrderStatus p ( NOLOCK )
+	JOIN @Status_Ordenes stat ON stat.Id_Num_Orden = p.OrderNo
+
+--
+-- quitar las ordenes canceladas del pedido cityclub.
+--
+delete from @Status_Ordenes where Id_Num_OrdenStat=11;
+
+--
+--	EN BASE AL TIPO DE SURTIDO, SE PUEDE COBRAR LA ORDEN?
+--
+IF EXISTS ( SELECT 1 FROM @Status_Ordenes WHERE Bit_UsaMovil <> 0 )
+	IF EXISTS ( SELECT 1 FROM @Status_Ordenes WHERE Bit_HaySurtidoTYC = 0 )
+	BEGIN
+	UPDATE @Status_Ordenes
+		SET		Id_Num_OrdenStat = 2,
+				--Desc_OrdenStat	  = 'Orden aún en proceso de surtido'
+				Desc_OrdenStat	  = 'Falta finalizar surtido orden: ' + CONVERT(varchar, Id_Num_Orden)
+		WHERE Bit_UsaMovil <> 0	AND Bit_HaySurtidoTYC = 0
+	END
+
+--
+--	RESPUESTA PARA PUNTO DE VENTA
+--
+--
+-- Se envía respuesta según si algunas de las órdenes consultadas tiene estatus en Surtido.
+IF EXISTS (SELECT 1 FROM @Status_Ordenes WHERE Id_Num_OrdenStat = 2)
+	BEGIN
+		SELECT 	TOP 1     
+					-- CONVERT(DECIMAL(12), @Id_Num_Orden) as Id_Num_Orden
+					 CONVERT(DECIMAL(12), @Id_Num_Original) as Id_Num_Orden
+					,Id_Num_Un							 as Id_Num_Un
+					,Id_Num_OrdenStat					 as Id_Num_OrdenStat
+					,Desc_OrdenStat                     as Desc_OrdenStat
+					,CONVERT(CHAR, Fec_Movto, 120)      as Fec_Movto
+					,Ind_Redondeo                       as Ind_Redondeo
+		FROM @Status_Ordenes
+		WHERE Id_Num_OrdenStat = 2
+	END
+ELSE
+	BEGIN
+	SELECT TOP 1 
+					-- CONVERT(DECIMAL(12), @Id_Num_Orden) as Id_Num_Orden
+					CONVERT(DECIMAL(12), @Id_Num_Original) as Id_Num_Orden
+					,Id_Num_Un							 as Id_Num_Un
+					,Id_Num_OrdenStat					 as Id_Num_OrdenStat
+					,Desc_OrdenStat                     as Desc_OrdenStat
+					,CONVERT(CHAR, Fec_Movto, 120)      as Fec_Movto
+					,Ind_Redondeo    as Ind_Redondeo
+		FROM @Status_Ordenes
+	END
+
